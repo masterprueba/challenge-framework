@@ -69,10 +69,9 @@ public class TransactionController {
                     processTransactionUseCase.execute(
                             request.operationNumber(),
                             request.channel(),
-                            request.amount(),
                             request.accountFrom(),
                             request.accountTo(),
-                            idempotencyKey
+                            request.amount()
                     )
                     .map(transaction -> {
                         HttpStatus status = transaction.getStatus() == TransactionStatus.COMPLETED
@@ -117,13 +116,13 @@ public class TransactionController {
             @Parameter(description = "Clave de idempotencia") @PathVariable String idempotencyKey) {
 
         return transactionRepository.findByIdempotencyKey(idempotencyKey)
-                .map(transaction -> ResponseEntity.ok(Map.of(
+                .map(transaction -> ResponseEntity.ok(Map.<String, Object>of(
                         "exists", true,
                         "transactionId", transaction.getTransactionId(),
                         "status", transaction.getStatus(),
                         "createdAt", transaction.getCreatedAt()
                 )))
-                .switchIfEmpty(Mono.just(ResponseEntity.ok(Map.of("exists", false))));
+                .switchIfEmpty(Mono.just(ResponseEntity.ok(Map.<String, Object>of("exists", false))));
     }
 
     private String buildIdempotencyKey(String operationNumber, String channel) {

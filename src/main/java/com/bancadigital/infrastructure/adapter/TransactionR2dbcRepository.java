@@ -7,9 +7,8 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
-import org.springframework.data.r2dbc.core.ReactiveSelect;
-import org.springframework.data.r2dbc.core.ReactiveInsert;
-import org.springframework.data.r2dbc.query.Query;
+import org.springframework.data.relational.core.query.Criteria;
+import org.springframework.data.relational.core.query.Query;
 import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Mono;
 
@@ -35,9 +34,7 @@ public class TransactionR2dbcRepository implements TransactionRepository {
 
     @Override
     public Mono<Transaction> findById(UUID transactionId) {
-        Query query = Query.query(
-                org.springframework.data.domain.ReactivePageable.of(
-                        org.springframework.data.domain.Pageable.ofSize(1)));
+        Query query = Query.empty().limit(1);
         return entityTemplate.select(TransactionEntity.class)
                 .matching(query)
                 .first()
@@ -49,9 +46,7 @@ public class TransactionR2dbcRepository implements TransactionRepository {
         return entityTemplate.select(TransactionEntity.class)
                 .from("transactions")
                 .matching(Query.query(
-                        org.springframework.data.r2dbc.core.where(
-                                org.springframework.data.r2dbc.core.Columns.from("idempotency_key")
-                                        .is(idempotencyKey))))
+                        Criteria.where("idempotency_key").is(idempotencyKey)))
                 .first()
                 .map(this::toDomain);
     }
@@ -69,9 +64,8 @@ public class TransactionR2dbcRepository implements TransactionRepository {
     public Mono<Void> deleteById(UUID transactionId) {
         return entityTemplate.delete(TransactionEntity.class)
                 .matching(Query.query(
-                        org.springframework.data.r2dbc.core.where(
-                                org.springframework.data.r2dbc.core.Columns.from("transaction_id")
-                                        .is(transactionId.toString()))))
+                        Criteria.where("transaction_id").is(transactionId.toString())))
+                .all()
                 .then();
     }
 

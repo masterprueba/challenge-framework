@@ -5,8 +5,6 @@ package com.bancadigital;
 
 
 
-import com.bancadigital.domain.model.Transaction;
-import com.bancadigital.infrastructure.adapter.TransactionR2dbcRepository;
 import com.bancadigital.application.usecase.ProcessTransactionUseCase;
 import com.bancadigital.config.IdempotencyConfig;
 import com.bancadigital.config.ResilienceConfig;
@@ -24,6 +22,7 @@ import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.concurrent.TimeoutException;
 
@@ -33,17 +32,14 @@ import java.util.concurrent.TimeoutException;
 @EnableWebFlux
 @EnableAsync
 @ConfigurationPropertiesScan
-@Import({com.bancadigital.config.ResilienceConfig.class, com.bancadigital.config.IdempotencyConfig.class})
+@Import({ResilienceConfig.class, IdempotencyConfig.class})
 public class Application {
 
-    private final com.bancadigital.application.usecase.ProcessTransactionUseCase processTransactionUseCase;
-    private final com.bancadigital.infrastructure.adapter.TransactionR2dbcRepository transactionRepository;
+    private final ProcessTransactionUseCase processTransactionUseCase;
     private final reactor.core.scheduler.Scheduler boundedElasticScheduler;
 
-    public Application(com.bancadigital.application.usecase.ProcessTransactionUseCase processTransactionUseCase,
-                      com.bancadigital.infrastructure.adapter.TransactionR2dbcRepository transactionRepository) {
+    public Application(ProcessTransactionUseCase processTransactionUseCase) {
         this.processTransactionUseCase = processTransactionUseCase;
-        this.transactionRepository = transactionRepository;
         this.boundedElasticScheduler = Schedulers.newBoundedElastic(10, 100, "transaction-scheduler");
     }
 
@@ -81,15 +77,12 @@ public class Application {
     public Mono<Void> warmup() {
         return Mono.fromRunnable(() -> {
                     // Simulación de carga inicial para verificar configuración
-                    processTransactionUseCase.processTransaction(
-                            new com.bancadigital.domain.model.Transaction(
-                                    "OP123456",
-                                    "MOBILE",
-                                    "10001",
-                                    "20002",
-                                    100.0,
-                                    "PENDING"
-                            )
+                    processTransactionUseCase.execute(
+                            "OP123456",
+                            "MOBILE",
+                            "10001",
+                            "20002",
+                            new BigDecimal("100.0")
                     ).subscribeOn(boundedElasticScheduler)
                     .subscribe(
                             result -> System.out.println("Warmup transaction processed: " + result),

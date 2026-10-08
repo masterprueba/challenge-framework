@@ -16,9 +16,8 @@
     <description>Servicio de procesamiento de transacciones bancarias con idempotencia y resiliencia</description>
 
     <properties>
-        <java.version>21</java.version>
+        <java.version>17</java.version>
         <resilience4j.version>2.2.0</resilience4j.version>
-        <r2dbc.postgresql.version>1.0.5.RELEASE</r2dbc.postgresql.version>
     </properties>
 
     <dependencies>
@@ -34,9 +33,8 @@
             <artifactId>spring-boot-starter-data-r2dbc</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.r2dbc</groupId>
+            <groupId>org.postgresql</groupId>
             <artifactId>r2dbc-postgresql</artifactId>
-            <version>${r2dbc.postgresql.version}</version>
         </dependency>
 
         <!-- Resilience4j -->
