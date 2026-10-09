@@ -10,7 +10,7 @@ spring:
       initial-size: 10
       max-size: 20
       max-idle-time: 30m
-      validation-query: SELECT 1
+      validation-depth: local
   redis:
     host: localhost
     port: 6379

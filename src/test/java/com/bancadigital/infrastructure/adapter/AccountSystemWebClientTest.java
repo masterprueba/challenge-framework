@@ -1,188 +1,180 @@
 package com.bancadigital.infrastructure.adapter;
 
-import com.bancadigital.domain.port.AccountSystemClient;
+import com.sun.net.httpserver.HttpServer;
+import com.bancadigital.domain.exception.AccountSystemTimeoutException;
+import com.bancadigital.domain.exception.AccountSystemUnavailableException;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.web.reactive.server.WebTestClient;
-import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureWebTestClient
-@ActiveProfiles("test")
-@DisplayName("AccountSystemWebClient - Pruebas de integración")
 class AccountSystemWebClientTest {
+    private HttpServer server;
+    private AccountSystemWebClient client;
+    private int status = 200;
+    private String response;
+    private final AtomicReference<String> requestUri = new AtomicReference<>();
+    private final AtomicReference<String> requestBody = new AtomicReference<>();
+    private final AtomicReference<String> requestMethod = new AtomicReference<>();
 
-    @Autowired
-    private WebTestClient webTestClient;
+    @BeforeEach
+    void setUp() throws Exception {
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/", exchange -> {
+            requestUri.set(exchange.getRequestURI().toString());
+            requestMethod.set(exchange.getRequestMethod());
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(status, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        client = new AccountSystemWebClient(WebClient.builder()
+                .baseUrl("http://localhost:" + server.getAddress().getPort()).build(), 2000, 3, 2, 2);
+    }
 
-    @Autowired
-    private AccountSystemClient accountSystemClient;
+    @AfterEach
+    void tearDown() {
+        if (server != null) server.stop(0);
+    }
 
-    @Nested
-    @DisplayName("Validación de cuentas")
-    class AccountValidationTests {
+    @Test
+    void validatesAccountFromHttpResponse() {
+        response = "{\"valid\":true}";
+        StepVerifier.create(client.validateAccount("10001")).expectNext(true).verifyComplete();
+        assertEquals("/api/accounts/10001/validate", requestUri.get());
+        assertEquals("GET", requestMethod.get());
+    }
 
-        @Test
-        @DisplayName("Validar cuenta existente - retorna true")
-        void validateExistingAccount_returnsTrue() {
-            when(accountSystemClient.validateAccount("1234567890")).thenReturn(Mono.just(true));
+    @Test
+    void preservesInvalidAccountResult() {
+        response = "{\"valid\":false}";
+        StepVerifier.create(client.validateAccount("10001")).expectNext(false).verifyComplete();
+    }
 
-            StepVerifier.create(accountSystemClient.validateAccount("1234567890"))
-                .expectNext(true)
-                .verifyComplete();
-        }
+    @Test
+    void reportsMissingAccount() {
+        status = 404;
+        response = "{}";
+        StepVerifier.create(client.validateAccount("10001"))
+                .expectErrorMessage("Cuenta no encontrada: 10001").verify();
+    }
 
-        @Test
-        @DisplayName("Validar cuenta inexistente - retorna false")
-        void validateNonExistentAccount_returnsFalse() {
-            when(accountSystemClient.validateAccount("9999999999")).thenReturn(Mono.just(false));
+    @Test
+    void checksFundsUsingAmountQuery() {
+        response = "{\"sufficient\":true}";
+        StepVerifier.create(client.checkSufficientFunds("10001", new BigDecimal("100.00")))
+                .expectNext(true).verifyComplete();
+        assertEquals("/api/accounts/10001/funds?amount=100.00", requestUri.get());
+    }
 
-            StepVerifier.create(accountSystemClient.validateAccount("9999999999"))
-                .expectNext(false)
-                .verifyComplete();
+    @Test
+    void preservesInsufficientFundsResult() {
+        response = "{\"sufficient\":false}";
+        StepVerifier.create(client.checkSufficientFunds("10001", new BigDecimal("100.00")))
+                .expectNext(false).verifyComplete();
+    }
+
+    @Test
+    void serializesTransferAndReadsSuccess() {
+        response = "{\"success\":true}";
+        StepVerifier.create(client.transferFunds("10001", "20002", new BigDecimal("100.00"), "OP001"))
+                .expectNext(true).verifyComplete();
+        assertEquals("POST", requestMethod.get());
+        assertEquals("/api/accounts/transfer", requestUri.get());
+        assertTrue(requestBody.get().contains("\"fromAccount\":\"10001\""));
+        assertTrue(requestBody.get().contains("\"toAccount\":\"20002\""));
+        assertTrue(requestBody.get().contains("\"amount\":100.00"));
+        assertTrue(requestBody.get().contains("\"operationNumber\":\"OP001\""));
+    }
+
+    @Test
+    void zeroRetriesPreservesConnectionFailureAndDoesNotRepeatRequests() {
+        List<Function<AccountSystemWebClient, Mono<Boolean>>> operations = List.of(
+                accounts -> accounts.validateAccount("10001"),
+                accounts -> accounts.checkSufficientFunds("10001", BigDecimal.ONE),
+                accounts -> accounts.transferFunds("10001", "20002", BigDecimal.ONE, "OP001"));
+        for (Function<AccountSystemWebClient, Mono<Boolean>> operation : operations) {
+            AtomicInteger attempts = new AtomicInteger();
+            WebClientRequestException original = connectionFailure();
+            AccountSystemWebClient accounts = new AccountSystemWebClient(
+                    failingTransport(attempts, original), 100, 0, 0, 0);
+            StepVerifier.create(operation.apply(accounts))
+                    .expectErrorMatches(error -> error instanceof AccountSystemUnavailableException
+                            && error.getCause() == original).verify();
+            assertEquals(1, attempts.get());
         }
     }
 
-    @Nested
-    @DisplayName("Verificación de fondos")
-    class FundsVerificationTests {
-
-        @Test
-        @DisplayName("Cuenta con fondos suficientes - retorna true")
-        void accountWithSufficientFunds_returnsTrue() {
-            when(accountSystemClient.checkSufficientFunds(anyString(), any(BigDecimal.class)))
-                .thenReturn(Mono.just(true));
-
-            StepVerifier.create(accountSystemClient.checkSufficientFunds("1234567890", new BigDecimal("1000.00")))
-                .expectNext(true)
-                .verifyComplete();
-        }
-
-        @Test
-        @DisplayName("Cuenta con fondos insuficientes - retorna false")
-        void accountWithInsufficientFunds_returnsFalse() {
-            when(accountSystemClient.checkSufficientFunds(anyString(), any(BigDecimal.class)))
-                .thenReturn(Mono.just(false));
-
-            StepVerifier.create(accountSystemClient.checkSufficientFunds("1234567890", new BigDecimal("999999.00")))
-                .expectNext(false)
-                .verifyComplete();
+    @Test
+    void zeroRetriesPreservesTimeoutForAllAccountOperations() {
+        List<Function<AccountSystemWebClient, Mono<Boolean>>> operations = List.of(
+                accounts -> accounts.validateAccount("10001"),
+                accounts -> accounts.checkSufficientFunds("10001", BigDecimal.ONE),
+                accounts -> accounts.transferFunds("10001", "20002", BigDecimal.ONE, "OP001"));
+        for (Function<AccountSystemWebClient, Mono<Boolean>> operation : operations) {
+            WebClient silent = WebClient.builder().baseUrl("http://accounts.invalid")
+                    .exchangeFunction(request -> Mono.never()).build();
+            AccountSystemWebClient accounts = new AccountSystemWebClient(silent, 100, 0, 0, 0);
+            StepVerifier.withVirtualTime(() -> operation.apply(accounts))
+                    .thenAwait(Duration.ofSeconds(2))
+                    .expectErrorMatches(error -> error instanceof AccountSystemTimeoutException
+                            && error.getCause() instanceof TimeoutException).verify();
         }
     }
 
-    @Nested
-    @DisplayName("Transferencia de fondos")
-    class FundTransferTests {
-
-        @Test
-        @DisplayName("Transferencia exitosa - retorna true")
-        void successfulTransfer_returnsTrue() {
-            when(accountSystemClient.transferFunds(anyString(), anyString(), any(BigDecimal.class), anyString()))
-                .thenReturn(Mono.just(true));
-
-            StepVerifier.create(accountSystemClient.transferFunds("1234567890", "0987654321", new BigDecimal("500.00"), "OP001"))
-                .expectNext(true)
-                .verifyComplete();
-        }
-
-        @Test
-        @DisplayName("Transferencia fallida - retorna false")
-        void failedTransfer_returnsFalse() {
-            when(accountSystemClient.transferFunds(anyString(), anyString(), any(BigDecimal.class), anyString()))
-                .thenReturn(Mono.just(false));
-
-            StepVerifier.create(accountSystemClient.transferFunds("1234567890", "0987654321", new BigDecimal("500.00"), "OP001"))
-                .expectNext(false)
-                .verifyComplete();
-        }
+    @Test
+    void exhaustedPositiveRetriesPreserveLastConnectionFailure() {
+        AtomicInteger attempts = new AtomicInteger();
+        WebClientRequestException original = connectionFailure();
+        AccountSystemWebClient accounts = new AccountSystemWebClient(
+                failingTransport(attempts, original), 100, 2, 0, 0);
+        StepVerifier.withVirtualTime(() -> accounts.validateAccount("10001"))
+                .thenAwait(Duration.ofSeconds(10))
+                .expectErrorMatches(error -> error instanceof AccountSystemUnavailableException
+                        && error.getCause() == original).verify();
+        assertEquals(3, attempts.get());
     }
 
-    @Nested
-    @DisplayName("Manejo de timeout")
-    class TimeoutHandlingTests {
-
-        @Test
-        @DisplayName("Timeout en validación de cuenta - lanza excepción después de 2 segundos")
-        void timeoutInValidation_throwsExceptionAfter2Seconds() {
-            when(accountSystemClient.validateAccount(anyString()))
-                .thenReturn(Mono.delay(Duration.ofSeconds(5)).then(Mono.just(true)));
-
-            StepVerifier.create(
-                    accountSystemClient.validateAccount("1234567890")
-                        .timeout(Duration.ofSeconds(2))
-                )
-                .expectErrorMatches(e -> e.getMessage().contains("Timeout") || e.getMessage().contains("timeout"))
-                .verify();
-        }
-
-        @Test
-        @DisplayName("Timeout en verificación de fondos - lanza excepción después de 2 segundos")
-        void timeoutInFundsCheck_throwsExceptionAfter2Seconds() {
-            when(accountSystemClient.checkSufficientFunds(anyString(), any(BigDecimal.class)))
-                .thenReturn(Mono.delay(Duration.ofSeconds(5)).then(Mono.just(true)));
-
-            StepVerifier.create(
-                    accountSystemClient.checkSufficientFunds("1234567890", new BigDecimal("1000.00"))
-                        .timeout(Duration.ofSeconds(2))
-                )
-                .expectErrorMatches(e -> e.getMessage().contains("Timeout") || e.getMessage().contains("timeout"))
-                .verify();
-        }
-
-        @Test
-        @DisplayName("Timeout en transferencia - lanza excepción después de 2 segundos")
-        void timeoutInTransfer_throwsExceptionAfter2Seconds() {
-            when(accountSystemClient.transferFunds(anyString(), anyString(), any(BigDecimal.class), anyString()))
-                .thenReturn(Mono.delay(Duration.ofSeconds(5)).then(Mono.just(true)));
-
-            StepVerifier.create(
-                    accountSystemClient.transferFunds("1234567890", "0987654321", new BigDecimal("500.00"), "OP001")
-                        .timeout(Duration.ofSeconds(2))
-                )
-                .expectErrorMatches(e -> e.getMessage().contains("Timeout") || e.getMessage().contains("timeout"))
-                .verify();
-        }
+    private WebClient failingTransport(AtomicInteger attempts, WebClientRequestException failure) {
+        return WebClient.builder().baseUrl("http://accounts.invalid")
+                .exchangeFunction(request -> Mono.defer(() -> {
+                    attempts.incrementAndGet();
+                    return Mono.error(failure);
+                })).build();
     }
 
-    @Nested
-    @DisplayName("Manejo de fallos")
-    class FailureHandlingTests {
+    private WebClientRequestException connectionFailure() {
+        return new WebClientRequestException(new IOException("Connection prematurely closed BEFORE response"),
+                HttpMethod.GET, URI.create("http://accounts.invalid"), new HttpHeaders());
+    }
 
-        @Test
-        @DisplayName("Error de conexión - lanza excepción genérica")
-        void connectionError_throwsGenericException() {
-            when(accountSystemClient.validateAccount(anyString()))
-                .thenReturn(Mono.error(new RuntimeException("Connection refused")));
-
-            StepVerifier.create(accountSystemClient.validateAccount("1234567890"))
-                .expectErrorMatches(e -> e.getMessage().contains("Connection"))
-                .verify();
-        }
-
-        @Test
-        @DisplayName("Error de servidor - lanza excepción con código 500")
-        void serverError_throwsException() {
-            when(accountSystemClient.transferFunds(anyString(), anyString(), any(BigDecimal.class), anyString()))
-                .thenReturn(Mono.error(new RuntimeException("Internal server error")));
-
-            StepVerifier.create(accountSystemClient.transferFunds("1234567890", "0987654321", new BigDecimal("500.00"), "OP001"))
-                .expectErrorMatches(e -> e.getMessage().contains("Internal") || e.getMessage().contains("server"))
-                .verify();
-        }
+    @Test
+    void preservesFailedTransferResult() {
+        response = "{\"success\":false}";
+        StepVerifier.create(client.transferFunds("10001", "20002", new BigDecimal("100.00"), "OP001"))
+                .expectNext(false).verifyComplete();
     }
 }

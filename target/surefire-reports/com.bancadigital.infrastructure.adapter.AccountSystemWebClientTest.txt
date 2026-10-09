@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.bancadigital.infrastructure.adapter.AccountSystemWebClientTest
+-------------------------------------------------------------------------------
+Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.049 s -- in com.bancadigital.infrastructure.adapter.AccountSystemWebClientTest

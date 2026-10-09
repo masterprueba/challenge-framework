@@ -3,7 +3,12 @@ param(
     [int]$Port = 8081,
 
     [ValidateRange(0, 60000)]
-    [int]$DelayMs = 0
+    [int]$DelayMs = 0,
+
+    [ValidateRange(1, 256)]
+    [int]$Threads = 4,
+
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,5 +44,5 @@ if (-not (Test-Path -LiteralPath $taskSocketTemp)) {
     New-Item -ItemType Directory -Path $taskSocketTemp | Out-Null
 }
 
-& $taskJavaExecutable "-Djdk.net.unixdomain.tmpdir=$taskSocketTemp" "-Dsimulator.port=$Port" "-Dsimulator.delay-ms=$DelayMs" $taskSourcePath
+& $taskJavaExecutable "-Djdk.net.unixdomain.tmpdir=$taskSocketTemp" "-Dsimulator.port=$Port" "-Dsimulator.delay-ms=$DelayMs" "-Dsimulator.threads=$Threads" "-Dsimulator.quiet=$($Quiet.IsPresent.ToString().ToLowerInvariant())" $taskSourcePath
 exit $LASTEXITCODE

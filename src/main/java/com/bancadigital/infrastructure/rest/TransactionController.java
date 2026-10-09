@@ -4,6 +4,10 @@ import com.bancadigital.application.usecase.ProcessTransactionUseCase;
 import com.bancadigital.domain.model.Transaction;
 import com.bancadigital.domain.model.Transaction.TransactionStatus;
 import com.bancadigital.domain.port.TransactionRepository;
+import com.bancadigital.domain.exception.AccountSystemTimeoutException;
+import com.bancadigital.domain.exception.AccountSystemUnavailableException;
+import com.bancadigital.domain.exception.TransactionTimeoutException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -19,6 +23,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
@@ -66,13 +71,13 @@ public class TransactionController {
                     return Mono.just(ResponseEntity.ok(toResponse(existing)));
                 })
                 .switchIfEmpty(
-                    processTransactionUseCase.execute(
+                    Mono.defer(() -> processTransactionUseCase.execute(
                             request.operationNumber(),
                             request.channel(),
                             request.accountFrom(),
                             request.accountTo(),
                             request.amount()
-                    )
+                    ))
                     .map(transaction -> {
                         HttpStatus status = transaction.getStatus() == TransactionStatus.COMPLETED
                                 ? HttpStatus.CREATED
@@ -80,6 +85,28 @@ public class TransactionController {
                         return ResponseEntity.status(status).body(toResponse(transaction));
                     })
                 )
+                .onErrorResume(AccountSystemTimeoutException.class, e ->
+                    Mono.just(ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
+                            .body(TransactionResponse.error(e.getMessage())))
+                )
+                .onErrorResume(TransactionTimeoutException.class, e ->
+                    Mono.just(ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
+                            .body(TransactionResponse.error(e.getMessage())))
+                )
+                .onErrorResume(AccountSystemUnavailableException.class, e ->
+                    Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                            .body(TransactionResponse.error(e.getMessage())))
+                )
+                .onErrorResume(CallNotPermittedException.class, e -> {
+                    log.debug("Sistema de cuentas en recuperación: {}", e.getMessage());
+                    return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                            .body(TransactionResponse.error("Sistema de cuentas temporalmente no disponible")));
+                })
+                .onErrorResume(DataAccessResourceFailureException.class, e -> {
+                    log.debug("No se pudo obtener una conexión a la base de datos: {}", e.getMessage());
+                    return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                            .body(TransactionResponse.error("Servicio temporalmente saturado o base de datos no disponible")));
+                })
                 .onErrorResume(ResponseStatusException.class, e ->
                     Mono.just(ResponseEntity.status(e.getStatusCode())
                             .body(TransactionResponse.error(e.getReason())))
@@ -126,7 +153,7 @@ public class TransactionController {
     }
 
     private String buildIdempotencyKey(String operationNumber, String channel) {
-        return operationNumber + "_" + channel;
+        return channel + "_" + operationNumber;
     }
 
     private TransactionResponse toResponse(Transaction transaction) {
@@ -139,7 +166,8 @@ public class TransactionController {
                 transaction.getCreatedAt(),
                 transaction.getUpdatedAt(),
                 transaction.getAccountFrom(),
-                transaction.getAccountTo()
+                transaction.getAccountTo(),
+                null
         );
     }
 
@@ -166,12 +194,13 @@ public class TransactionController {
             LocalDateTime createdAt,
             LocalDateTime updatedAt,
             String accountFrom,
-            String accountTo
+            String accountTo,
+            String message
     ) {
         public static TransactionResponse error(String message) {
             return new TransactionResponse(
                     null, null, null, null, "ERROR",
-                    null, null, null, null
+                    null, null, null, null, message
             );
         }
     }

@@ -27,14 +27,40 @@ public class TransactionR2dbcRepository implements TransactionRepository {
 
     @Override
     public Mono<Transaction> save(Transaction transaction) {
-        TransactionEntity entity = toEntity(transaction);
-        return entityTemplate.insert(entity)
-                .map(this::toDomain);
+        return entityTemplate.getDatabaseClient()
+                .sql("""
+                        INSERT INTO transactions (transaction_id, operation_number, channel, amount,
+                            status, created_at, updated_at, account_from, account_to, idempotency_key)
+                        VALUES (:id, :operation, :channel, :amount, :status, :createdAt, :updatedAt,
+                            :accountFrom, :accountTo, :idempotencyKey)
+                        ON CONFLICT (transaction_id) DO UPDATE SET
+                            operation_number = EXCLUDED.operation_number,
+                            channel = EXCLUDED.channel,
+                            amount = EXCLUDED.amount,
+                            status = EXCLUDED.status,
+                            updated_at = EXCLUDED.updated_at,
+                            account_from = EXCLUDED.account_from,
+                            account_to = EXCLUDED.account_to,
+                            idempotency_key = EXCLUDED.idempotency_key
+                        """)
+                .bind("id", transaction.getTransactionId().toString())
+                .bind("operation", transaction.getOperationNumber())
+                .bind("channel", transaction.getChannel())
+                .bind("amount", transaction.getAmount())
+                .bind("status", transaction.getStatus().name())
+                .bind("createdAt", transaction.getCreatedAt())
+                .bind("updatedAt", transaction.getUpdatedAt())
+                .bind("accountFrom", transaction.getAccountFrom())
+                .bind("accountTo", transaction.getAccountTo())
+                .bind("idempotencyKey", transaction.getIdempotencyKey())
+                .fetch()
+                .rowsUpdated()
+                .thenReturn(transaction);
     }
 
     @Override
     public Mono<Transaction> findById(UUID transactionId) {
-        Query query = Query.empty().limit(1);
+        Query query = Query.query(Criteria.where("transaction_id").is(transactionId.toString()));
         return entityTemplate.select(TransactionEntity.class)
                 .matching(query)
                 .first()
@@ -67,21 +93,6 @@ public class TransactionR2dbcRepository implements TransactionRepository {
                         Criteria.where("transaction_id").is(transactionId.toString())))
                 .all()
                 .then();
-    }
-
-    private TransactionEntity toEntity(Transaction transaction) {
-        TransactionEntity entity = new TransactionEntity();
-        entity.setTransactionId(transaction.getTransactionId().toString());
-        entity.setOperationNumber(transaction.getOperationNumber());
-        entity.setChannel(transaction.getChannel());
-        entity.setAmount(transaction.getAmount());
-        entity.setStatus(transaction.getStatus().name());
-        entity.setCreatedAt(transaction.getCreatedAt());
-        entity.setUpdatedAt(transaction.getUpdatedAt());
-        entity.setAccountFrom(transaction.getAccountFrom());
-        entity.setAccountTo(transaction.getAccountTo());
-        entity.setIdempotencyKey(transaction.getIdempotencyKey());
-        return entity;
     }
 
     private Transaction toDomain(TransactionEntity entity) {

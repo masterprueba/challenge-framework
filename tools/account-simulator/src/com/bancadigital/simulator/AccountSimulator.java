@@ -16,14 +16,16 @@ public class AccountSimulator {
     public static void main(String[] args) throws IOException {
         int port = Integer.parseInt(System.getProperty("simulator.port", "8081"));
         int delayMs = Integer.parseInt(System.getProperty("simulator.delay-ms", "0"));
-        if (port < 1 || port > 65535 || delayMs < 0 || delayMs > 60000) {
-            throw new IllegalArgumentException("Puerto: 1-65535. Demora: 0-60000 ms.");
+        int threads = Integer.parseInt(System.getProperty("simulator.threads", "4"));
+        boolean quiet = Boolean.parseBoolean(System.getProperty("simulator.quiet", "false"));
+        if (port < 1 || port > 65535 || delayMs < 0 || delayMs > 60000 || threads < 1 || threads > 256) {
+            throw new IllegalArgumentException("Puerto: 1-65535. Demora: 0-60000 ms. Hilos: 1-256.");
         }
 
         HttpServer server = HttpServer.create(new InetSocketAddress("localhost", port), 0);
-        ExecutorService executor = Executors.newFixedThreadPool(4);
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
         server.setExecutor(executor);
-        server.createContext("/", exchange -> handleRequest(exchange, delayMs));
+        server.createContext("/", exchange -> handleRequest(exchange, delayMs, quiet));
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(0);
@@ -32,13 +34,14 @@ public class AccountSimulator {
 
         server.start();
         System.out.printf("Simulador de cuentas en http://localhost:%d%n", port);
-        System.out.printf("Demora por respuesta: %d ms. Detener con Ctrl+C.%n", delayMs);
+        System.out.printf("Demora: %d ms. Hilos: %d. Silencioso: %s. Detener con Ctrl+C.%n",
+                delayMs, threads, quiet);
     }
 
-    private static void handleRequest(HttpExchange exchange, int delayMs) {
+    private static void handleRequest(HttpExchange exchange, int delayMs, boolean quiet) {
         String method = exchange.getRequestMethod();
         String path = exchange.getRequestURI().getPath();
-        System.out.printf("%s %s%n", method, exchange.getRequestURI());
+        if (!quiet) System.out.printf("%s %s%n", method, exchange.getRequestURI());
 
         try {
             String expectedMethod;

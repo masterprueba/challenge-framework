@@ -1,0 +1,54 @@
+# Initial values for local measurements, not a guarantee of 10,000 TPS.
+spring:
+  r2dbc:
+    pool:
+      initial-size: ${DB_POOL_INITIAL:20}
+      max-size: ${DB_POOL_MAX:40}
+      max-acquire-time: 500ms
+      max-create-connection-time: 5s
+      max-validation-time: 1s
+      max-life-time: 30m
+      validation-depth: local
+
+account-system:
+  connection-timeout-ms: 1000
+  response-timeout-ms: 1500
+  pool:
+    max-connections: ${ACCOUNT_POOL_MAX:256}
+    pending-acquire-max-count: ${ACCOUNT_POOL_PENDING_MAX:512}
+    pending-acquire-timeout-ms: 500
+    metrics-enabled: true
+  retry:
+    validation: 0
+    funds: 0
+    transfer: 0
+
+transaction:
+  timeout:
+    seconds: 2
+  retry:
+    max-attempts: 1
+    wait-ms: 500
+
+management:
+  server:
+    port: ${MANAGEMENT_PORT:9090}
+    address: 127.0.0.1
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      slo:
+        http.server.requests: 10ms,25ms,50ms,100ms,200ms,500ms,1s,2s
+
+logging:
+  level:
+    root: WARN
+    com.bancadigital: WARN
+    org.springframework.r2dbc: WARN
+    io.r2dbc.postgresql: WARN
+    reactor.netty: WARN

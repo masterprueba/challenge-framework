@@ -8,6 +8,7 @@ import io.github.resilience4j.timelimiter.TimeLimiterConfig;
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Value;
 
 import java.time.Duration;
 
@@ -29,19 +30,22 @@ public class ResilienceConfig {
     }
 
     @Bean
-    public RetryRegistry retryRegistry() {
+    public RetryRegistry retryRegistry(
+            @Value("${transaction.retry.max-attempts:3}") int maxAttempts,
+            @Value("${transaction.retry.wait-ms:500}") int waitMs) {
         RetryConfig config = RetryConfig.custom()
-                .maxAttempts(3)
-                .waitDuration(Duration.ofMillis(500))
+                .maxAttempts(maxAttempts)
+                .waitDuration(Duration.ofMillis(waitMs))
                 .build();
 
         return RetryRegistry.of(config);
     }
 
     @Bean
-    public TimeLimiterRegistry timeLimiterRegistry() {
+    public TimeLimiterRegistry timeLimiterRegistry(
+            @Value("${transaction.timeout.seconds:2}") int timeoutSeconds) {
         TimeLimiterConfig config = TimeLimiterConfig.custom()
-                .timeoutDuration(Duration.ofSeconds(2))
+                .timeoutDuration(Duration.ofSeconds(timeoutSeconds))
                 .build();
 
         return TimeLimiterRegistry.of(config);

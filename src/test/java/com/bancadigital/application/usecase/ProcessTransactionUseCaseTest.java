@@ -2,174 +2,113 @@ package com.bancadigital.application.usecase;
 
 import com.bancadigital.domain.model.Transaction;
 import com.bancadigital.domain.model.Transaction.TransactionStatus;
-import com.bancadigital.domain.port.TransactionRepository;
 import com.bancadigital.domain.port.AccountSystemClient;
-import com.bancadigital.domain.exception.IdempotencyConflictException;
-import com.bancadigital.domain.exception.AccountNotFoundException;
-import com.bancadigital.domain.exception.InsufficientFundsException;
+import com.bancadigital.domain.port.TransactionRepository;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
-import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-@DisplayName("ProcessTransactionUseCase - Pruebas de unidad")
 class ProcessTransactionUseCaseTest {
-
-    @Mock
-    private TransactionRepository transactionRepository;
-    @Mock
-    private AccountSystemClient accountSystemClient;
-
+    @Mock private TransactionRepository repository;
+    @Mock private AccountSystemClient accounts;
     private ProcessTransactionUseCase useCase;
+    private final BigDecimal amount = new BigDecimal("100.00");
 
     @BeforeEach
     void setUp() {
-        useCase = new ProcessTransactionUseCase(transactionRepository, accountSystemClient);
+        useCase = new ProcessTransactionUseCase(repository, accounts, 2);
     }
 
-    @Nested
-    @DisplayName("Escenarios de idempotencia")
-    class IdempotencyScenarios {
-
-        @Test
-        @DisplayName("Primera invocación con clave de idempotencia - crea nueva transacción")
-        void firstInvocationWithIdempotencyKey_createsNewTransaction() {
-            String idempotencyKey = "OP001-CHANNEL_WEB";
-            Transaction transaction = Transaction.createPendingTransaction(
-                "OP001", "WEB", new BigDecimal("1000.00"), "1234567890", "0987654321"
-            );
-            transaction.setIdempotencyKey(idempotencyKey);
-
-            when(transactionRepository.existsByIdempotencyKey(idempotencyKey)).thenReturn(Mono.just(false));
-            when(accountSystemClient.validateAccount("1234567890")).thenReturn(Mono.just(true));
-            when(accountSystemClient.validateAccount("0987654321")).thenReturn(Mono.just(true));
-            when(accountSystemClient.checkSufficientFunds("1234567890", new BigDecimal("1000.00")))
-                .thenReturn(Mono.just(true));
-            when(accountSystemClient.transferFunds("1234567890", "0987654321", new BigDecimal("1000.00"), "OP001"))
-                .thenReturn(Mono.just(true));
-            when(transactionRepository.save(any(Transaction.class))).thenReturn(Mono.just(transaction));
-
-            StepVerifier.create(useCase.execute("OP001", "WEB", new BigDecimal("1000.00"), "1234567890", "0987654321", idempotencyKey))
-                .expectNextMatches(tx -> tx.status() == TransactionStatus.COMPLETED)
-                .verifyComplete();
-
-            verify(transactionRepository).save(any(Transaction.class));
-        }
-
-        @Test
-        @DisplayName("Segunda invocación con misma clave de idempotencia - retorna transacción existente")
-        void secondInvocationWithSameIdempotencyKey_returnsExistingTransaction() {
-            String idempotencyKey = "OP001-CHANNEL_WEB";
-            Transaction existingTransaction = Transaction.createPendingTransaction(
-                "OP001", "WEB", new BigDecimal("1000.00"), "1234567890", "0987654321"
-            );
-            existingTransaction.setIdempotencyKey(idempotencyKey);
-            existingTransaction.complete();
-
-            when(transactionRepository.existsByIdempotencyKey(idempotencyKey)).thenReturn(Mono.just(true));
-            when(transactionRepository.findByIdempotencyKey(idempotencyKey))
-                .thenReturn(Mono.just(existingTransaction));
-
-            StepVerifier.create(useCase.execute("OP001", "WEB", new BigDecimal("1000.00"), "1234567890", "0987654321", idempotencyKey))
-                .expectNextMatches(tx -> tx.status() == TransactionStatus.COMPLETED && tx.transactionId().equals(existingTransaction.transactionId()))
-                .verifyComplete();
-
-            verify(transactionRepository, never()).save(any(Transaction.class));
-            verify(accountSystemClient, never()).transferFunds(anyString(), anyString(), any(), anyString());
-        }
-
-        @Test
-        @DisplayName("Clave de idempotencia duplicada con parámetros diferentes - lanza excepción")
-        void duplicateIdempotencyKeyWithDifferentParameters_throwsException() {
-            String idempotencyKey = "OP001-CHANNEL_WEB";
-            Transaction existingTransaction = Transaction.createPendingTransaction(
-                "OP001", "WEB", new BigDecimal("1000.00"), "1234567890", "0987654321"
-            );
-            existingTransaction.setIdempotencyKey(idempotencyKey);
-
-            when(transactionRepository.existsByIdempotencyKey(idempotencyKey)).thenReturn(Mono.just(true));
-            when(transactionRepository.findByIdempotencyKey(idempotencyKey))
-                .thenReturn(Mono.just(existingTransaction));
-
-            StepVerifier.create(useCase.execute("OP001", "WEB", new BigDecimal("2000.00"), "1111111111", "2222222222", idempotencyKey))
-                .expectError(IdempotencyConflictException.class)
-                .verify();
-        }
+    private void newTransaction() {
+        when(repository.findByIdempotencyKey("WEB_OP001")).thenReturn(Mono.empty());
+        when(repository.save(any())).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
     }
 
-    @Nested
-    @DisplayName("Escenarios de validación de cuenta")
-    class AccountValidationScenarios {
+    @Test
+    void successfulTransferPreservesIdAndPersistsCompletedState() {
+        newTransaction();
+        when(accounts.validateAccount("10001")).thenReturn(Mono.just(true));
+        when(accounts.validateAccount("20002")).thenReturn(Mono.just(true));
+        when(accounts.checkSufficientFunds("10001", amount)).thenReturn(Mono.just(true));
+        when(accounts.transferFunds("10001", "20002", amount, "OP001")).thenReturn(Mono.just(true));
 
-        @Test
-        @DisplayName("Cuenta de origen inexistente - lanza AccountNotFoundException")
-        void nonExistentSourceAccount_throwsAccountNotFoundException() {
-            String idempotencyKey = "OP002-CHANNEL_MOBILE";
-
-            when(transactionRepository.existsByIdempotencyKey(idempotencyKey)).thenReturn(Mono.just(false));
-            when(accountSystemClient.validateAccount("0000000000")).thenReturn(Mono.just(false));
-
-            StepVerifier.create(useCase.execute("OP002", "MOBILE", new BigDecimal("500.00"), "0000000000", "0987654321", idempotencyKey))
-                .expectError(AccountNotFoundException.class)
-                .verify();
-        }
-
-        @Test
-        @DisplayName("Fondos insuficientes - lanza InsufficientFundsException")
-        void insufficientFunds_throwsInsufficientFundsException() {
-            String idempotencyKey = "OP003-CHANNEL_ATM";
-
-            when(transactionRepository.existsByIdempotencyKey(idempotencyKey)).thenReturn(Mono.just(false));
-            when(accountSystemClient.validateAccount("1234567890")).thenReturn(Mono.just(true));
-            when(accountSystemClient.validateAccount("0987654321")).thenReturn(Mono.just(true));
-            when(accountSystemClient.checkSufficientFunds("1234567890", new BigDecimal("999999.99")))
-                .thenReturn(Mono.just(false));
-
-            StepVerifier.create(useCase.execute("OP003", "ATM", new BigDecimal("999999.99"), "1234567890", "0987654321", idempotencyKey))
-                .expectError(InsufficientFundsException.class)
-                .verify();
-        }
-    }
-
-    @Nested
-    @DisplayName("Escenarios de timeout")
-    class TimeoutScenarios {
-
-        @Test
-        @DisplayName("Timeout en validación de cuenta - la transacción queda en estado PENDING")
-        void timeoutInAccountValidation_transactionRemainsPending() {
-            String idempotencyKey = "OP004-CHANNEL_API";
-            Transaction pendingTransaction = Transaction.createPendingTransaction(
-                "OP004", "API", new BigDecimal("2500.00"), "1234567890", "0987654321"
-            );
-            pendingTransaction.setIdempotencyKey(idempotencyKey);
-
-            when(transactionRepository.existsByIdempotencyKey(idempotencyKey)).thenReturn(Mono.just(false));
-            when(accountSystemClient.validateAccount("1234567890"))
-                .thenReturn(Mono.error(new RuntimeException("Connection timeout")));
-            when(transactionRepository.save(any(Transaction.class))).thenReturn(Mono.just(pendingTransaction));
-
-            StepVerifier.create(useCase.execute("OP004", "API", new BigDecimal("2500.00"), "1234567890", "0987654321", idempotencyKey))
-                .expectNextMatches(tx -> tx.status() == TransactionStatus.PENDING)
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .expectNextMatches(tx -> tx.getStatus() == TransactionStatus.COMPLETED)
                 .verifyComplete();
 
-            verify(transactionRepository).save(any(Transaction.class));
-        }
+        ArgumentCaptor<Transaction> saved = ArgumentCaptor.forClass(Transaction.class);
+        verify(repository, times(2)).save(saved.capture());
+        Transaction pending = saved.getAllValues().get(0);
+        Transaction completed = saved.getAllValues().get(1);
+        assertEquals(TransactionStatus.PENDING, pending.getStatus());
+        assertEquals(TransactionStatus.COMPLETED, completed.getStatus());
+        assertEquals(pending.getTransactionId(), completed.getTransactionId());
+        assertEquals(pending.getCreatedAt(), completed.getCreatedAt());
+        assertEquals("WEB_OP001", completed.getIdempotencyKey());
+        verify(accounts).transferFunds("10001", "20002", amount, "OP001");
+    }
+
+    @Test
+    void existingTransactionDoesNotSaveOrCallAccounts() {
+        Transaction existing = Transaction.createPendingTransaction(
+                "OP001", "WEB", amount, "10001", "20002", "WEB_OP001").complete();
+        when(repository.findByIdempotencyKey("WEB_OP001")).thenReturn(Mono.just(existing));
+
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .assertNext(tx -> assertSame(existing, tx))
+                .verifyComplete();
+
+        verify(repository, never()).save(any());
+        verifyNoInteractions(accounts);
+    }
+
+    @Test
+    void invalidSourceDoesNotTransferOrSaveCompletedState() {
+        newTransaction();
+        when(accounts.validateAccount("10001")).thenReturn(Mono.just(false));
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .expectErrorMessage("Cuenta de origen inválida")
+                .verify();
+        verify(repository).save(any());
+        verify(accounts, never()).validateAccount("20002");
+        verify(accounts, never()).transferFunds(any(), any(), any(), any());
+    }
+
+    @Test
+    void insufficientFundsDoesNotTransfer() {
+        newTransaction();
+        when(accounts.validateAccount("10001")).thenReturn(Mono.just(true));
+        when(accounts.validateAccount("20002")).thenReturn(Mono.just(true));
+        when(accounts.checkSufficientFunds("10001", amount)).thenReturn(Mono.just(false));
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .expectErrorMessage("Fondos insuficientes")
+                .verify();
+        verify(accounts, never()).transferFunds(any(), any(), any(), any());
+        verify(repository).save(any());
+    }
+
+    @Test
+    void accountErrorPreservesOriginalCause() {
+        newTransaction();
+        RuntimeException original = new RuntimeException("Connection refused");
+        when(accounts.validateAccount("10001")).thenReturn(Mono.error(original));
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .expectErrorMatches(error -> error == original)
+                .verify();
+        verify(repository).save(any());
+        verify(accounts, never()).transferFunds(any(), any(), any(), any());
     }
 }

@@ -22,10 +22,13 @@ com\bancadigital\domain\exception\AccountSystemTimeoutException.class
 com\bancadigital\infrastructure\exception\GlobalExceptionHandler$ErrorResponse.class
 com\bancadigital\domain\exception\AccountNotFoundException.class
 com\bancadigital\config\IdempotencyConfig$IdempotencyService.class
+com\bancadigital\config\AccountWebClientConfig.class
 com\bancadigital\infrastructure\adapter\AccountSystemWebClient$TransferFailedException.class
 com\bancadigital\Application.class
 com\bancadigital\domain\model\Transaction$TransactionBuilder.class
 com\bancadigital\domain\exception\TransactionProcessingException.class
+com\bancadigital\domain\exception\AccountSystemUnavailableException.class
 com\bancadigital\domain\port\TransactionRepository.class
 com\bancadigital\infrastructure\adapter\AccountSystemWebClient$TransferResponse.class
 com\bancadigital\infrastructure\rest\TransactionController$TransactionResponse.class
+com\bancadigital\domain\exception\TransactionTimeoutException.class

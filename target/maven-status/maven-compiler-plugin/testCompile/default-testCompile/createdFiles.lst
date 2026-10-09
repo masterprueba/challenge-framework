@@ -1,0 +1,4 @@
+com\bancadigital\infrastructure\adapter\AccountSystemWebClientTest.class
+com\bancadigital\infrastructure\rest\TransactionControllerTest.class
+com\bancadigital\application\usecase\ProcessTransactionUseCaseTest.class
+com\bancadigital\infrastructure\rest\TransactionFlowIntegrationTest.class
