@@ -40,6 +40,7 @@ public class AccountWebClientConfig {
             @Value("${account-system.connection-timeout-ms:5000}") int connectionTimeoutMs,
             @Value("${account-system.response-timeout-ms:2000}") int responseTimeoutMs) {
         HttpClient client = HttpClient.create(connections)
+                .disableRetry(true)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectionTimeoutMs)
                 .responseTimeout(Duration.ofMillis(responseTimeoutMs));
         return builder.clone()

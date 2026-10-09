@@ -5,8 +5,12 @@ import com.bancadigital.domain.model.Transaction.TransactionStatus;
 import com.bancadigital.domain.port.AccountSystemClient;
 import com.bancadigital.domain.port.TransactionRepository;
 import com.bancadigital.domain.exception.TransactionTimeoutException;
-import io.github.resilience4j.retry.annotation.Retry;
-import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
+import com.bancadigital.domain.exception.IdempotencyConflictException;
+import com.bancadigital.domain.exception.IdempotencyReplayException;
+import com.bancadigital.domain.exception.IdempotencyUnavailableException;
+import com.bancadigital.domain.model.IdempotencyRecord;
+import com.bancadigital.domain.model.TransactionResult;
+import com.bancadigital.domain.port.IdempotencyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,6 +22,11 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.List;
 
 @Service
 public class ProcessTransactionUseCase {
@@ -27,29 +36,94 @@ public class ProcessTransactionUseCase {
     private final TransactionRepository transactionRepository;
     private final AccountSystemClient accountSystemClient;
     private final Duration operationTimeout;
+    private final IdempotencyStore idempotencyStore;
+    private final Duration duplicateWait;
 
     public ProcessTransactionUseCase(
             TransactionRepository transactionRepository,
             AccountSystemClient accountSystemClient,
-            @Value("${transaction.timeout.seconds:2}") int timeoutSeconds) {
+            IdempotencyStore idempotencyStore,
+            @Value("${transaction.timeout.seconds:2}") int timeoutSeconds,
+            @Value("${idempotency.duplicate-wait-ms:3000}") int duplicateWaitMs) {
         this.transactionRepository = transactionRepository;
         this.accountSystemClient = accountSystemClient;
         this.operationTimeout = Duration.ofSeconds(timeoutSeconds);
+        this.idempotencyStore = idempotencyStore;
+        this.duplicateWait = Duration.ofMillis(duplicateWaitMs);
     }
 
-    @TimeLimiter(name = "transaction", fallbackMethod = "handleTimeoutFallback")
-    @Retry(name = "accountSystem")
     public Mono<Transaction> execute(String operationNumber, String channel, String accountFrom,
                                       String accountTo, BigDecimal amount) {
-        String idempotencyKey = buildIdempotencyKey(operationNumber, channel);
+        return executeWithResult(operationNumber, channel, accountFrom, accountTo, amount)
+                .map(TransactionResult::transaction);
+    }
 
-        return transactionRepository.findByIdempotencyKey(idempotencyKey)
-                .flatMap(existingTransaction -> {
-                    log.info("Transacción idempotente encontrada para clave: {}", idempotencyKey);
-                    return Mono.just(existingTransaction);
-                })
-                .switchIfEmpty(Mono.defer(() -> createAndProcessTransaction(operationNumber, channel,
-                        accountFrom, accountTo, amount, idempotencyKey)));
+    public Mono<TransactionResult> executeWithResult(String operationNumber, String channel,
+            String accountFrom, String accountTo, BigDecimal amount) {
+        return Mono.defer(() -> {
+            String key = buildIdempotencyKey(operationNumber, channel);
+            String fingerprint = fingerprint(operationNumber, channel, accountFrom, accountTo, amount);
+            IdempotencyRecord pending = new IdempotencyRecord(UUID.randomUUID().toString(),
+                    fingerprint, null, null, null);
+            return idempotencyStore.reserve(key, pending).flatMap(owner -> {
+                if (!owner) return awaitResult(key, fingerprint);
+                // Timeout applies to processing only, never cancels a duplicate's reservation.
+                return createAndProcessTransaction(operationNumber, channel, accountFrom, accountTo, amount, key)
+                        .timeout(operationTimeout)
+                        .onErrorMap(TimeoutException.class, error -> new TransactionTimeoutException(
+                                "Tiempo máximo de procesamiento de la transacción agotado", error))
+                        .switchIfEmpty(Mono.error(new IllegalStateException("Procesamiento sin resultado")))
+                        .materialize()
+                        .flatMap(signal -> {
+                            if (signal.hasValue()) {
+                                Transaction result = signal.get();
+                                return idempotencyStore.complete(key, new IdempotencyRecord(pending.owner(),
+                                        fingerprint, result, null, null))
+                                        .thenReturn(new TransactionResult(result, false));
+                            }
+                            Throwable error = signal.getThrowable();
+                            TransactionFailure failure = TransactionFailure.from(error);
+                            return idempotencyStore.complete(key, new IdempotencyRecord(pending.owner(),
+                                    fingerprint, null, failure.status(), failure.message()))
+                                    .then(Mono.<TransactionResult>error(error));
+                        });
+            });
+        });
+    }
+
+    public Mono<IdempotencyRecord> findIdempotency(String key) {
+        return idempotencyStore.find(key);
+    }
+
+    private Mono<TransactionResult> awaitResult(String key, String fingerprint) {
+        return Mono.defer(() -> idempotencyStore.find(key)
+                        .switchIfEmpty(Mono.error(new IdempotencyUnavailableException(
+                                "La reserva de idempotencia ya no está disponible", null)))
+                        .flatMap(entry -> {
+                            if (!entry.fingerprint().equals(fingerprint)) return Mono.error(
+                                    new IdempotencyConflictException("La clave de idempotencia ya fue usada con otros datos"));
+                            return entry.finished() ? Mono.just(entry) : Mono.empty();
+                        }))
+                .repeatWhenEmpty(repeats -> repeats.delayElements(Duration.ofMillis(50)))
+                .timeout(duplicateWait, Mono.error(new IdempotencyConflictException(
+                        "La transacción con esta clave todavía está en proceso")))
+                .flatMap(entry -> entry.errorStatus() != null
+                        ? Mono.error(new IdempotencyReplayException(entry.errorStatus(), entry.errorMessage()))
+                        : Mono.just(new TransactionResult(entry.transaction(), true)));
+    }
+
+    private String fingerprint(String operation, String channel, String from, String to, BigDecimal amount) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (String field : List.of(operation, channel, from, to, amount.stripTrailingZeros().toPlainString())) {
+                byte[] value = field.getBytes(StandardCharsets.UTF_8);
+                digest.update(java.nio.ByteBuffer.allocate(4).putInt(value.length).array());
+                digest.update(value);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private Mono<Transaction> createAndProcessTransaction(String operationNumber, String channel,
@@ -112,15 +186,11 @@ public class ProcessTransactionUseCase {
     }
 
     private String buildIdempotencyKey(String operationNumber, String channel) {
-        return channel + "_" + operationNumber;
+        // Escape the separator so (WEB_A, B) and (WEB, A_B) are different identities.
+        return escapeKeyPart(channel) + "_" + escapeKeyPart(operationNumber);
     }
 
-    private Mono<Transaction> handleTimeoutFallback(String operationNumber, String channel,
-                                                     String accountFrom, String accountTo,
-                                                     BigDecimal amount, TimeoutException throwable) {
-        log.debug("Timeout de transacción. Operación: {}, Tiempo límite: {}",
-                operationNumber, operationTimeout);
-        return Mono.error(new TransactionTimeoutException(
-                "Tiempo máximo de procesamiento de la transacción agotado", throwable));
+    private String escapeKeyPart(String part) {
+        return part.replace("%", "%25").replace("_", "%5F");
     }
 }

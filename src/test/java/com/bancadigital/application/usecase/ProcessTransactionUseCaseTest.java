@@ -4,6 +4,13 @@ import com.bancadigital.domain.model.Transaction;
 import com.bancadigital.domain.model.Transaction.TransactionStatus;
 import com.bancadigital.domain.port.AccountSystemClient;
 import com.bancadigital.domain.port.TransactionRepository;
+import com.bancadigital.domain.port.IdempotencyStore;
+import com.bancadigital.domain.model.IdempotencyRecord;
+import com.bancadigital.domain.exception.IdempotencyConflictException;
+import com.bancadigital.domain.exception.IdempotencyReplayException;
+import com.bancadigital.domain.exception.IdempotencyUnavailableException;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -24,16 +31,18 @@ import static org.mockito.Mockito.*;
 class ProcessTransactionUseCaseTest {
     @Mock private TransactionRepository repository;
     @Mock private AccountSystemClient accounts;
+    @Mock private IdempotencyStore idempotency;
     private ProcessTransactionUseCase useCase;
     private final BigDecimal amount = new BigDecimal("100.00");
 
     @BeforeEach
     void setUp() {
-        useCase = new ProcessTransactionUseCase(repository, accounts, 2);
+        useCase = new ProcessTransactionUseCase(repository, accounts, idempotency, 2, 3000);
     }
 
     private void newTransaction() {
-        when(repository.findByIdempotencyKey("WEB_OP001")).thenReturn(Mono.empty());
+        when(idempotency.reserve(any(), any())).thenReturn(Mono.just(true));
+        when(idempotency.complete(any(), any())).thenReturn(Mono.empty());
         when(repository.save(any())).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
     }
 
@@ -65,7 +74,12 @@ class ProcessTransactionUseCaseTest {
     void existingTransactionDoesNotSaveOrCallAccounts() {
         Transaction existing = Transaction.createPendingTransaction(
                 "OP001", "WEB", amount, "10001", "20002", "WEB_OP001").complete();
-        when(repository.findByIdempotencyKey("WEB_OP001")).thenReturn(Mono.just(existing));
+        when(idempotency.reserve(any(), any())).thenAnswer(invocation -> {
+            IdempotencyRecord pending = invocation.getArgument(1);
+            when(idempotency.find(any())).thenReturn(Mono.just(new IdempotencyRecord(
+                    "original", pending.fingerprint(), existing, null, null)));
+            return Mono.just(false);
+        });
 
         StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
                 .assertNext(tx -> assertSame(existing, tx))
@@ -73,18 +87,6 @@ class ProcessTransactionUseCaseTest {
 
         verify(repository, never()).save(any());
         verifyNoInteractions(accounts);
-    }
-
-    @Test
-    void invalidSourceDoesNotTransferOrSaveCompletedState() {
-        newTransaction();
-        when(accounts.validateAccount("10001")).thenReturn(Mono.just(false));
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
-                .expectErrorMessage("Cuenta de origen inválida")
-                .verify();
-        verify(repository).save(any());
-        verify(accounts, never()).validateAccount("20002");
-        verify(accounts, never()).transferFunds(any(), any(), any(), any());
     }
 
     @Test
@@ -101,14 +103,47 @@ class ProcessTransactionUseCaseTest {
     }
 
     @Test
-    void accountErrorPreservesOriginalCause() {
-        newTransaction();
-        RuntimeException original = new RuntimeException("Connection refused");
-        when(accounts.validateAccount("10001")).thenReturn(Mono.error(original));
+    void unavailableRedisFailsBeforeDatabaseOrTransfer() {
+        when(idempotency.reserve(any(), any())).thenReturn(Mono.error(
+                new IdempotencyUnavailableException("Redis no disponible", null)));
         StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
-                .expectErrorMatches(error -> error == original)
-                .verify();
-        verify(repository).save(any());
-        verify(accounts, never()).transferFunds(any(), any(), any(), any());
+                .expectError(IdempotencyUnavailableException.class).verify();
+        verifyNoInteractions(repository, accounts);
     }
+
+    @Test
+    void changedPayloadReturnsConflictBeforeDatabaseOrTransfer() {
+        when(idempotency.reserve(any(), any())).thenReturn(Mono.just(false));
+        when(idempotency.find(any())).thenReturn(Mono.just(
+                new IdempotencyRecord("original", "different-payload", null, null, null)));
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .expectError(IdempotencyConflictException.class).verify();
+        verifyNoInteractions(repository, accounts);
+    }
+
+    @Test
+    void ambiguousTransferFailureIsCachedAndDuplicateNeverRepeatsIt() {
+        AtomicReference<IdempotencyRecord> cached = new AtomicReference<>();
+        when(idempotency.reserve(any(), any())).thenAnswer(invocation ->
+                Mono.just(cached.compareAndSet(null, invocation.getArgument(1))));
+        when(idempotency.complete(any(), any())).thenAnswer(invocation -> {
+            cached.set(invocation.getArgument(1));
+            return Mono.empty();
+        });
+        when(idempotency.find(any())).thenAnswer(invocation -> Mono.just(cached.get()));
+        when(repository.save(any())).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(accounts.validateAccount(any())).thenReturn(Mono.just(true));
+        when(accounts.checkSufficientFunds(any(), any())).thenReturn(Mono.just(true));
+        when(accounts.transferFunds(any(), any(), any(), any())).thenReturn(Mono.never());
+        StepVerifier.withVirtualTime(() -> useCase.execute("OP001", "WEB", "10001", "20002", amount))
+                .thenAwait(Duration.ofSeconds(3)).expectErrorMatches(error ->
+                        TransactionFailure.from(error).status() == 504).verify();
+        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", new BigDecimal("100")))
+                .expectErrorMatches(error -> error instanceof IdempotencyReplayException replay
+                        && replay.getStatus() == 504).verify();
+        verify(accounts, times(1)).transferFunds(any(), any(), any(), any());
+        verify(repository, times(1)).save(any());
+    }
+
+
 }

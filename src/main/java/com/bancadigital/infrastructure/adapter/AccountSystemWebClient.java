@@ -29,19 +29,16 @@ public class AccountSystemWebClient implements AccountSystemClient {
     private final Duration responseTimeout;
     private final int validationRetries;
     private final int fundsRetries;
-    private final int transferRetries;
 
     public AccountSystemWebClient(
             @Qualifier("accountSystemHttpClient") WebClient webClient,
             @Value("${account-system.response-timeout-ms:2000}") int responseTimeoutMs,
             @Value("${account-system.retry.validation:3}") int validationRetries,
-            @Value("${account-system.retry.funds:2}") int fundsRetries,
-            @Value("${account-system.retry.transfer:2}") int transferRetries) {
+            @Value("${account-system.retry.funds:2}") int fundsRetries) {
         this.webClient = webClient;
         this.responseTimeout = Duration.ofMillis(responseTimeoutMs);
         this.validationRetries = validationRetries;
         this.fundsRetries = fundsRetries;
-        this.transferRetries = transferRetries;
     }
 
     @Override
@@ -114,8 +111,8 @@ public class AccountSystemWebClient implements AccountSystemClient {
                 })
                 .bodyToMono(TransferResponse.class)
                 .timeout(responseTimeout.plus(Duration.ofSeconds(1)))
-                .transform(response -> applyRetryPolicy(response, transferRetries, Duration.ofMillis(500),
-                        error -> !(error instanceof TransferFailedException)))
+                // A timed-out POST may already have debited the account. Never retry it automatically.
+                .transform(response -> applyRetryPolicy(response, 0, Duration.ofMillis(500), error -> false))
                 .map(TransferResponse::isSuccess)
                 .doOnSuccess(result -> log.info("Transferencia {} -> {} completada: {}",
                         fromAccount, toAccount, result))

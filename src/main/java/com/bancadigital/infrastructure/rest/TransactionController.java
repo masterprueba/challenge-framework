@@ -1,13 +1,10 @@
 package com.bancadigital.infrastructure.rest;
 
 import com.bancadigital.application.usecase.ProcessTransactionUseCase;
+import com.bancadigital.application.usecase.TransactionFailure;
 import com.bancadigital.domain.model.Transaction;
 import com.bancadigital.domain.model.Transaction.TransactionStatus;
 import com.bancadigital.domain.port.TransactionRepository;
-import com.bancadigital.domain.exception.AccountSystemTimeoutException;
-import com.bancadigital.domain.exception.AccountSystemUnavailableException;
-import com.bancadigital.domain.exception.TransactionTimeoutException;
-import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -23,10 +20,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
@@ -53,6 +48,7 @@ public class TransactionController {
         @ApiResponse(responseCode = "200", description = "Transacción duplicada - retorna la transacción original",
                      content = @Content(schema = @Schema(implementation = TransactionResponse.class))),
         @ApiResponse(responseCode = "400", description = "Datos de entrada inválidos"),
+        @ApiResponse(responseCode = "409", description = "Clave usada con otros datos o transacción en proceso"),
         @ApiResponse(responseCode = "422", description = "Error de negocio - cuenta inválida o fondos insuficientes"),
         @ApiResponse(responseCode = "503", description = "Sistema de cuentas no disponible"),
         @ApiResponse(responseCode = "504", description = "Timeout del sistema de cuentas")
@@ -63,58 +59,19 @@ public class TransactionController {
         log.info("Recibida solicitud de transacción: operationNumber={}, channel={}, amount={}",
                 request.operationNumber(), request.channel(), request.amount());
 
-        String idempotencyKey = buildIdempotencyKey(request.operationNumber(), request.channel());
-
-        return transactionRepository.findByIdempotencyKey(idempotencyKey)
-                .flatMap(existing -> {
-                    log.info("Transacción idempotente encontrada: {}", existing.getTransactionId());
-                    return Mono.just(ResponseEntity.ok(toResponse(existing)));
+        return processTransactionUseCase.executeWithResult(request.operationNumber(), request.channel(),
+                        request.accountFrom(), request.accountTo(), request.amount())
+                .map(result -> {
+                    HttpStatus status = result.replayed() ? HttpStatus.OK
+                            : result.transaction().getStatus() == TransactionStatus.COMPLETED
+                            ? HttpStatus.CREATED : HttpStatus.UNPROCESSABLE_ENTITY;
+                    return ResponseEntity.status(status).body(toResponse(result.transaction()));
                 })
-                .switchIfEmpty(
-                    Mono.defer(() -> processTransactionUseCase.execute(
-                            request.operationNumber(),
-                            request.channel(),
-                            request.accountFrom(),
-                            request.accountTo(),
-                            request.amount()
-                    ))
-                    .map(transaction -> {
-                        HttpStatus status = transaction.getStatus() == TransactionStatus.COMPLETED
-                                ? HttpStatus.CREATED
-                                : HttpStatus.UNPROCESSABLE_ENTITY;
-                        return ResponseEntity.status(status).body(toResponse(transaction));
-                    })
-                )
-                .onErrorResume(AccountSystemTimeoutException.class, e ->
-                    Mono.just(ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
-                            .body(TransactionResponse.error(e.getMessage())))
-                )
-                .onErrorResume(TransactionTimeoutException.class, e ->
-                    Mono.just(ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
-                            .body(TransactionResponse.error(e.getMessage())))
-                )
-                .onErrorResume(AccountSystemUnavailableException.class, e ->
-                    Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                            .body(TransactionResponse.error(e.getMessage())))
-                )
-                .onErrorResume(CallNotPermittedException.class, e -> {
-                    log.debug("Sistema de cuentas en recuperación: {}", e.getMessage());
-                    return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                            .body(TransactionResponse.error("Sistema de cuentas temporalmente no disponible")));
-                })
-                .onErrorResume(DataAccessResourceFailureException.class, e -> {
-                    log.debug("No se pudo obtener una conexión a la base de datos: {}", e.getMessage());
-                    return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                            .body(TransactionResponse.error("Servicio temporalmente saturado o base de datos no disponible")));
-                })
-                .onErrorResume(ResponseStatusException.class, e ->
-                    Mono.just(ResponseEntity.status(e.getStatusCode())
-                            .body(TransactionResponse.error(e.getReason())))
-                )
-                .onErrorResume(Exception.class, e -> {
-                    log.error("Error inesperado procesando transacción", e);
-                    return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                            .body(TransactionResponse.error("Error interno del servidor")));
+                .onErrorResume(error -> {
+                    TransactionFailure failure = TransactionFailure.from(error);
+                    if (failure.status() == 500) log.error("Error inesperado procesando transacción", error);
+                    return Mono.just(ResponseEntity.status(failure.status())
+                            .body(TransactionResponse.error(failure.message())));
                 });
     }
 
@@ -142,18 +99,23 @@ public class TransactionController {
     public Mono<ResponseEntity<Map<String, Object>>> checkIdempotency(
             @Parameter(description = "Clave de idempotencia") @PathVariable String idempotencyKey) {
 
-        return transactionRepository.findByIdempotencyKey(idempotencyKey)
-                .map(transaction -> ResponseEntity.ok(Map.<String, Object>of(
-                        "exists", true,
-                        "transactionId", transaction.getTransactionId(),
-                        "status", transaction.getStatus(),
-                        "createdAt", transaction.getCreatedAt()
-                )))
-                .switchIfEmpty(Mono.just(ResponseEntity.ok(Map.<String, Object>of("exists", false))));
-    }
-
-    private String buildIdempotencyKey(String operationNumber, String channel) {
-        return channel + "_" + operationNumber;
+        return processTransactionUseCase.findIdempotency(idempotencyKey)
+                .map(entry -> {
+                    Map<String, Object> result = new java.util.LinkedHashMap<>();
+                    result.put("exists", true);
+                    if (entry.transaction() != null) {
+                        Transaction transaction = entry.transaction();
+                        result.put("transactionId", transaction.getTransactionId());
+                        result.put("status", transaction.getStatus());
+                        result.put("createdAt", transaction.getCreatedAt());
+                    } else {
+                        result.put("status", entry.errorStatus() == null ? "PENDING" : "ERROR");
+                    }
+                    return ResponseEntity.ok(result);
+                })
+                .switchIfEmpty(Mono.just(ResponseEntity.ok(Map.<String, Object>of("exists", false))))
+                .onErrorResume(error -> Mono.just(ResponseEntity.status(503)
+                        .body(Map.<String, Object>of("message", "Servicio de idempotencia Redis no disponible"))));
     }
 
     private TransactionResponse toResponse(Transaction transaction) {

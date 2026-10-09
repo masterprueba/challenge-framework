@@ -21,7 +21,6 @@ account-system:
   retry:
     validation: 0
     funds: 0
-    transfer: 0
 
 transaction:
   timeout:
