@@ -1,7 +1,6 @@
 package com.bancadigital.application.usecase;
 
 import com.bancadigital.domain.model.Transaction;
-import com.bancadigital.domain.model.Transaction.TransactionStatus;
 import com.bancadigital.domain.port.AccountSystemClient;
 import com.bancadigital.domain.port.TransactionRepository;
 import com.bancadigital.domain.exception.TransactionTimeoutException;
@@ -19,7 +18,6 @@ import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
 import java.time.Duration;
-import java.time.LocalDateTime;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -50,12 +48,6 @@ public class ProcessTransactionUseCase {
         this.operationTimeout = Duration.ofSeconds(timeoutSeconds);
         this.idempotencyStore = idempotencyStore;
         this.duplicateWait = Duration.ofMillis(duplicateWaitMs);
-    }
-
-    public Mono<Transaction> execute(String operationNumber, String channel, String accountFrom,
-                                      String accountTo, BigDecimal amount) {
-        return executeWithResult(operationNumber, channel, accountFrom, accountTo, amount)
-                .map(TransactionResult::transaction);
     }
 
     public Mono<TransactionResult> executeWithResult(String operationNumber, String channel,
@@ -131,21 +123,11 @@ public class ProcessTransactionUseCase {
                                                            BigDecimal amount, String idempotencyKey) {
         log.info("Creando nueva transacción con clave de idempotencia: {}", idempotencyKey);
 
-        Transaction pendingTransaction = Transaction.builder()
-                .transactionId(UUID.randomUUID())
-                .operationNumber(operationNumber)
-                .channel(channel)
-                .amount(amount)
-                .status(TransactionStatus.PENDING)
-                .createdAt(LocalDateTime.now())
-                .updatedAt(LocalDateTime.now())
-                .accountFrom(accountFrom)
-                .accountTo(accountTo)
-                .idempotencyKey(idempotencyKey)
-                .build();
+        Transaction pendingTransaction = Transaction.createPendingTransaction(operationNumber, channel,
+                amount, accountFrom, accountTo, idempotencyKey);
 
         return transactionRepository.save(pendingTransaction)
-                .flatMap(savedTransaction -> validateAndExecuteTransfer(savedTransaction))
+                .flatMap(this::validateAndExecuteTransfer)
                 .doOnError(error -> log.debug("Error al procesar transacción: {}", error.getMessage()));
     }
 
@@ -165,24 +147,7 @@ public class ProcessTransactionUseCase {
                         transaction.getOperationNumber())))
                 .filter(Boolean::booleanValue)
                 .switchIfEmpty(Mono.error(new IllegalStateException("Falló la transferencia en sistema de cuentas")))
-                .then(Mono.defer(() -> updateTransactionStatus(transaction, TransactionStatus.COMPLETED)));
-    }
-
-    private Mono<Transaction> updateTransactionStatus(Transaction transaction, TransactionStatus status) {
-        Transaction updatedTransaction = Transaction.builder()
-                .transactionId(transaction.getTransactionId())
-                .operationNumber(transaction.getOperationNumber())
-                .channel(transaction.getChannel())
-                .amount(transaction.getAmount())
-                .status(status)
-                .createdAt(transaction.getCreatedAt())
-                .updatedAt(LocalDateTime.now())
-                .accountFrom(transaction.getAccountFrom())
-                .accountTo(transaction.getAccountTo())
-                .idempotencyKey(transaction.getIdempotencyKey())
-                .build();
-
-        return transactionRepository.save(updatedTransaction);
+                .then(Mono.defer(() -> transactionRepository.save(transaction.complete())));
     }
 
     private String buildIdempotencyKey(String operationNumber, String channel) {

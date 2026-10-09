@@ -62,11 +62,7 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Cache con Redis -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cache</artifactId>
-        </dependency>
+        <!-- Idempotencia con Redis reactivo -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis-reactive</artifactId>

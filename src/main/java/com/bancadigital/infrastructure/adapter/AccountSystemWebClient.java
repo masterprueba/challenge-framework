@@ -3,6 +3,9 @@ package com.bancadigital.infrastructure.adapter;
 import com.bancadigital.domain.port.AccountSystemClient;
 import com.bancadigital.domain.exception.AccountSystemTimeoutException;
 import com.bancadigital.domain.exception.AccountSystemUnavailableException;
+import com.bancadigital.domain.exception.AccountNotFoundException;
+import com.bancadigital.domain.exception.InsufficientFundsException;
+import com.bancadigital.domain.exception.TransactionProcessingException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -103,7 +106,7 @@ public class AccountSystemWebClient implements AccountSystemClient {
                 .retrieve()
                 .onStatus(HttpStatusCode::is4xxClientError, response -> {
                     log.error("Error de cliente en transferencia: {}", response.statusCode());
-                    return Mono.just(new TransferFailedException("Error en la solicitud de transferencia"));
+                    return Mono.just(new TransactionProcessingException("Error en la solicitud de transferencia"));
                 })
                 .onStatus(HttpStatusCode::is5xxServerError, response -> {
                     log.error("Error de servidor en transferencia: {}", response.statusCode());
@@ -112,7 +115,7 @@ public class AccountSystemWebClient implements AccountSystemClient {
                 .bodyToMono(TransferResponse.class)
                 .timeout(responseTimeout.plus(Duration.ofSeconds(1)))
                 // A timed-out POST may already have debited the account. Never retry it automatically.
-                .transform(response -> applyRetryPolicy(response, 0, Duration.ofMillis(500), error -> false))
+                .transform(this::mapAccountErrors)
                 .map(TransferResponse::isSuccess)
                 .doOnSuccess(result -> log.info("Transferencia {} -> {} completada: {}",
                         fromAccount, toAccount, result))
@@ -125,6 +128,10 @@ public class AccountSystemWebClient implements AccountSystemClient {
         Mono<T> result = retries == 0 ? request : request.retryWhen(Retry.backoff(retries, backoff)
                 .filter(retryable)
                 .onRetryExhaustedThrow((spec, signal) -> signal.failure()));
+        return mapAccountErrors(result);
+    }
+
+    private <T> Mono<T> mapAccountErrors(Mono<T> result) {
         return result
                 .onErrorMap(TimeoutException.class, error -> new AccountSystemTimeoutException(
                         "Tiempo de espera agotado para el sistema de cuentas", error))
@@ -181,18 +188,6 @@ public class AccountSystemWebClient implements AccountSystemClient {
 
         public boolean isSuccess() { return success; }
         public void setSuccess(boolean success) { this.success = success; }
-    }
-
-    private static class AccountNotFoundException extends RuntimeException {
-        public AccountNotFoundException(String message) { super(message); }
-    }
-
-    private static class InsufficientFundsException extends RuntimeException {
-        public InsufficientFundsException(String message) { super(message); }
-    }
-
-    private static class TransferFailedException extends RuntimeException {
-        public TransferFailedException(String message) { super(message); }
     }
 
     private static class AccountSystemException extends RuntimeException {

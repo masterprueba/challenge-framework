@@ -18,10 +18,6 @@ spring:
       password: ${REDIS_PASSWORD:}
       connect-timeout: 1s
       timeout: 2s
-  cache:
-    type: redis
-    redis:
-      time-to-live: 86400000 # 24 horas en milisegundos para idempotencia
 
 server:
   port: 8080
@@ -34,22 +30,6 @@ resilience4j:
     configs:
       default:
         registerHealthIndicator: true
-        slidingWindowSize: 10
-        minimumNumberOfCalls: 5
-        permittedNumberOfCallsInHalfOpenState: 3
-        automaticTransitionFromOpenToHalfOpenEnabled: true
-        waitDurationInOpenState: 5s
-        failureRateThreshold: 50
-        eventConsumerBufferSize: 10
-  retry:
-    configs:
-      default:
-        maxRetryAttempts: 3
-        waitDuration: 500ms
-  timelimiter:
-    configs:
-      default:
-        timeoutDuration: 2s
 
 idempotency:
   key-prefix: "idempotency:"

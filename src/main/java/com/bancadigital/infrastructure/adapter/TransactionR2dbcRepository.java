@@ -67,34 +67,6 @@ public class TransactionR2dbcRepository implements TransactionRepository {
                 .map(this::toDomain);
     }
 
-    @Override
-    public Mono<Transaction> findByIdempotencyKey(String idempotencyKey) {
-        return entityTemplate.select(TransactionEntity.class)
-                .from("transactions")
-                .matching(Query.query(
-                        Criteria.where("idempotency_key").is(idempotencyKey)))
-                .first()
-                .map(this::toDomain);
-    }
-
-    @Override
-    public Mono<Boolean> existsByIdempotencyKey(String idempotencyKey) {
-        return entityTemplate.getDatabaseClient()
-                .sql("SELECT COUNT(*) FROM transactions WHERE idempotency_key = :key")
-                .bind("key", idempotencyKey)
-                .map((row, metadata) -> row.get(0, Long.class) > 0)
-                .first();
-    }
-
-    @Override
-    public Mono<Void> deleteById(UUID transactionId) {
-        return entityTemplate.delete(TransactionEntity.class)
-                .matching(Query.query(
-                        Criteria.where("transaction_id").is(transactionId.toString())))
-                .all()
-                .then();
-    }
-
     private Transaction toDomain(TransactionEntity entity) {
         return Transaction.builder()
                 .transactionId(UUID.fromString(entity.getTransactionId()))

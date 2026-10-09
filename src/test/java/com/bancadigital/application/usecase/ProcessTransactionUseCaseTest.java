@@ -54,8 +54,9 @@ class ProcessTransactionUseCaseTest {
         when(accounts.checkSufficientFunds("10001", amount)).thenReturn(Mono.just(true));
         when(accounts.transferFunds("10001", "20002", amount, "OP001")).thenReturn(Mono.just(true));
 
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
-                .expectNextMatches(tx -> tx.getStatus() == TransactionStatus.COMPLETED)
+        StepVerifier.create(useCase.executeWithResult("OP001", "WEB", "10001", "20002", amount))
+                .expectNextMatches(result -> !result.replayed()
+                        && result.transaction().getStatus() == TransactionStatus.COMPLETED)
                 .verifyComplete();
 
         ArgumentCaptor<Transaction> saved = ArgumentCaptor.forClass(Transaction.class);
@@ -81,8 +82,11 @@ class ProcessTransactionUseCaseTest {
             return Mono.just(false);
         });
 
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
-                .assertNext(tx -> assertSame(existing, tx))
+        StepVerifier.create(useCase.executeWithResult("OP001", "WEB", "10001", "20002", amount))
+                .assertNext(result -> {
+                    assertSame(existing, result.transaction());
+                    org.junit.jupiter.api.Assertions.assertTrue(result.replayed());
+                })
                 .verifyComplete();
 
         verify(repository, never()).save(any());
@@ -95,7 +99,7 @@ class ProcessTransactionUseCaseTest {
         when(accounts.validateAccount("10001")).thenReturn(Mono.just(true));
         when(accounts.validateAccount("20002")).thenReturn(Mono.just(true));
         when(accounts.checkSufficientFunds("10001", amount)).thenReturn(Mono.just(false));
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+        StepVerifier.create(useCase.executeWithResult("OP001", "WEB", "10001", "20002", amount))
                 .expectErrorMessage("Fondos insuficientes")
                 .verify();
         verify(accounts, never()).transferFunds(any(), any(), any(), any());
@@ -106,7 +110,7 @@ class ProcessTransactionUseCaseTest {
     void unavailableRedisFailsBeforeDatabaseOrTransfer() {
         when(idempotency.reserve(any(), any())).thenReturn(Mono.error(
                 new IdempotencyUnavailableException("Redis no disponible", null)));
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+        StepVerifier.create(useCase.executeWithResult("OP001", "WEB", "10001", "20002", amount))
                 .expectError(IdempotencyUnavailableException.class).verify();
         verifyNoInteractions(repository, accounts);
     }
@@ -116,7 +120,7 @@ class ProcessTransactionUseCaseTest {
         when(idempotency.reserve(any(), any())).thenReturn(Mono.just(false));
         when(idempotency.find(any())).thenReturn(Mono.just(
                 new IdempotencyRecord("original", "different-payload", null, null, null)));
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", amount))
+        StepVerifier.create(useCase.executeWithResult("OP001", "WEB", "10001", "20002", amount))
                 .expectError(IdempotencyConflictException.class).verify();
         verifyNoInteractions(repository, accounts);
     }
@@ -135,10 +139,10 @@ class ProcessTransactionUseCaseTest {
         when(accounts.validateAccount(any())).thenReturn(Mono.just(true));
         when(accounts.checkSufficientFunds(any(), any())).thenReturn(Mono.just(true));
         when(accounts.transferFunds(any(), any(), any(), any())).thenReturn(Mono.never());
-        StepVerifier.withVirtualTime(() -> useCase.execute("OP001", "WEB", "10001", "20002", amount))
+        StepVerifier.withVirtualTime(() -> useCase.executeWithResult("OP001", "WEB", "10001", "20002", amount))
                 .thenAwait(Duration.ofSeconds(3)).expectErrorMatches(error ->
                         TransactionFailure.from(error).status() == 504).verify();
-        StepVerifier.create(useCase.execute("OP001", "WEB", "10001", "20002", new BigDecimal("100")))
+        StepVerifier.create(useCase.executeWithResult("OP001", "WEB", "10001", "20002", new BigDecimal("100")))
                 .expectErrorMatches(error -> error instanceof IdempotencyReplayException replay
                         && replay.getStatus() == 504).verify();
         verify(accounts, times(1)).transferFunds(any(), any(), any(), any());

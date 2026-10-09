@@ -1,0 +1,3 @@
+com\bancadigital\infrastructure\adapter\AccountSystemWebClientTest.class
+com\bancadigital\infrastructure\adapter\RedisIdempotencyStoreIntegrationTest.class
+com\bancadigital\application\usecase\ProcessTransactionUseCaseTest.class

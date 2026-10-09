@@ -25,9 +25,6 @@ account-system:
 transaction:
   timeout:
     seconds: 2
-  retry:
-    max-attempts: 1
-    wait-ms: 500
 
 management:
   server:

@@ -53,17 +53,4 @@ public class Transaction {
                 .build();
     }
 
-    public Transaction fail() {
-        return this.toBuilder()
-                .status(TransactionStatus.FAILED)
-                .updatedAt(LocalDateTime.now())
-                .build();
-    }
-
-    public Transaction rollback() {
-        return this.toBuilder()
-                .status(TransactionStatus.ROLLED_BACK)
-                .updatedAt(LocalDateTime.now())
-                .build();
-    }
 }
